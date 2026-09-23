@@ -19,5 +19,5 @@ module.exports = {
       ]
     }]
   ],
-  branches: ['main', '14.x'],
+  branches: ['main', '14.x', 'main-ams'],
 };
