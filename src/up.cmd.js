@@ -140,8 +140,7 @@ export default class UpCommand extends AbstractServerCommand {
         .withSite(site)
         .withOrg(org)
         .withSiteLoginUrl(
-          // TODO switch to production URL
-          `https://admin.hlx.page/login/${org}/${site}/main?client_id=aem-cli&redirect_uri=${encodeURIComponent(`http://localhost:${this._httpPort}/.aem/cli/login/ack`)}&selectAccount=true`,
+          `https://admin.${process.env.HLX_PROD_SERVER_HOST_LIVE || 'hlx.page'}/login/${org}/${site}/main?client_id=aem-cli&redirect_uri=${encodeURIComponent(`http://localhost:${this._httpPort}/.aem/cli/login/ack`)}&selectAccount=true`,
         );
     }
 
@@ -167,7 +166,11 @@ export default class UpCommand extends AbstractServerCommand {
     if (parts.length < 3) {
       return errorResult;
     }
-    if (!['live', 'page'].includes(parts[2]) || !['hlx', 'aem'].includes(parts[1])) {
+    const domainPrefixes = ['hlx', 'aem'];
+    if (process.env.HLX_DOMAIN_PREFIX) {
+      domainPrefixes.push(process.env.HLX_DOMAIN_PREFIX);
+    }
+    if (!['live', 'page'].includes(parts[2]) || !domainPrefixes.includes(parts[1])) {
       return errorResult;
     }
     const [, site, org] = parts[0].split('--');
@@ -177,14 +180,15 @@ export default class UpCommand extends AbstractServerCommand {
   async initUrl(gitUrl, ref) {
     const dnsName = `${ref.replace(/\//g, '-')}--${gitUrl.repo}--${gitUrl.owner}`;
     // check length limit
+    const pageDomain = process.env.HLX_PROD_SERVER_HOST_PAGE || 'aem.page';
     if (dnsName.length > 63) {
-      this.log.error(chalk`URL {yellow https://${dnsName}.aem.page} exceeds the 63 character limit for DNS labels.`);
+      this.log.error(chalk`URL {yellow https://${dnsName}.${pageDomain}} exceeds the 63 character limit for DNS labels.`);
       this.log.error(chalk`Please use a shorter branch name or a shorter repository name.`);
       await this.stop();
       throw Error('branch name too long');
     }
 
-    const url = this._originalUrl || 'https://main--{{repo}}--{{owner}}.aem.page';
+    const url = this._originalUrl || `https://main--{{repo}}--{{owner}}.${pageDomain}`;
     this._url = url.replace(/\{\{(owner|repo)\}\}/g, (_, key) => gitUrl[key]);
   }
 
