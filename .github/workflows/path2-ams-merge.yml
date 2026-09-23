@@ -1,0 +1,247 @@
+name: Path 2 - AMS Merge Sync
+
+# Syncs adobe/helix-cli-ams (main) → adobe/helix-cli-ams (main-ams)
+# Merges whenever main's release version changes (major, minor, or patch)
+# Triggered automatically by Path 1 completing, or manually
+
+on:
+  workflow_dispatch:        # Triggered by Path 1 or manually
+    inputs:
+      force_sync:
+        description: 'Force sync regardless of release check (for testing)'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  SOURCE_BRANCH: ${{ vars.DEST_BRANCH || 'main' }}         # main (output of Path 1)
+  AMS_BRANCH: ${{ vars.AMS_BRANCH || 'main-ams' }}         # main-ams (AMS customized branch)
+  UPSTREAM_REPO: ${{ vars.UPSTREAM_REPO }}                  # e.g. adobe/helix-cli
+
+jobs:
+  ams-merge:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write   # needed to push merged changes
+      # No issues:write -- Issues are disabled on this repo; all notify checks
+      # (including conflicts) are Slack-only, same as the other notify checks.
+
+    steps:
+      - name: Checkout AMS Branch
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+          ref: ${{ env.AMS_BRANCH }}
+
+      - name: Check for Release Update on Main
+        id: version_check
+        run: |
+          git fetch origin
+
+          # Get version from package.json on main branch
+          LATEST=$(git show origin/${{ env.SOURCE_BRANCH }}:package.json | jq -r '.version')
+          LATEST="v${LATEST}"
+
+          # Get current version on main-ams branch (HEAD = main-ams)
+          AMS_VERSION=$(cat package.json | jq -r '.version')
+          AMS_VERSION="v${AMS_VERSION}"
+
+          echo "Latest version on main:     $LATEST"
+          echo "Current version on main-ams: $AMS_VERSION"
+
+          echo "latest_tag=$LATEST" >> $GITHUB_OUTPUT
+          echo "ams_tag=$AMS_VERSION" >> $GITHUB_OUTPUT
+
+          if [ "${{ inputs.force_sync }}" = "true" ]; then
+            echo "is_minor=true" >> $GITHUB_OUTPUT
+            echo "trigger_reason=Force sync" >> $GITHUB_OUTPUT
+            echo "⚡ Force sync enabled — bypassing release check."
+          elif [ "$LATEST" != "$AMS_VERSION" ]; then
+            echo "is_minor=true" >> $GITHUB_OUTPUT
+            echo "trigger_reason=Release updated ($AMS_VERSION → $LATEST)" >> $GITHUB_OUTPUT
+            echo "✅ New release on main: main=$LATEST, main-ams=$AMS_VERSION — proceeding with AMS merge."
+          else
+            echo "is_minor=false" >> $GITHUB_OUTPUT
+            echo "trigger_reason=No new release — skipped" >> $GITHUB_OUTPUT
+            echo "⏭️ Same version ($LATEST) — skipping AMS merge."
+          fi
+
+      - name: Check for Changes to Merge
+        id: changes_check
+        if: steps.version_check.outputs.is_minor == 'true'
+        run: |
+          git fetch origin
+
+          SOURCE_SHA=$(git rev-parse origin/${{ env.SOURCE_BRANCH }})
+          AMS_SHA=$(git rev-parse HEAD)
+
+          echo "Source (main) SHA: $SOURCE_SHA"
+          echo "AMS branch SHA:    $AMS_SHA"
+          echo "source_sha=$SOURCE_SHA" >> $GITHUB_OUTPUT
+          echo "pre_merge_sha=$AMS_SHA" >> $GITHUB_OUTPUT
+
+          if [ "$SOURCE_SHA" = "$AMS_SHA" ]; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "⏭️ AMS branch already up to date — nothing to merge."
+          else
+            BEHIND=$(git rev-list HEAD..origin/${{ env.SOURCE_BRANCH }} --count)
+            echo "commits_behind=$BEHIND" >> $GITHUB_OUTPUT
+            if [ "$BEHIND" = "0" ]; then
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+              echo "⏭️ AMS branch is ahead of main — nothing to merge."
+            else
+              echo "has_changes=true" >> $GITHUB_OUTPUT
+              echo "🔄 $BEHIND new commits to merge into ${{ env.AMS_BRANCH }}."
+            fi
+          fi
+
+      - name: Merge Main into AMS Branch
+        id: merge_step
+        if: steps.version_check.outputs.is_minor == 'true' && steps.changes_check.outputs.has_changes == 'true'
+        env:
+          SOURCE_TOKEN: ${{ secrets.SOURCE_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Attempt fast-forward first (cleanest)
+          if git merge --ff-only origin/${{ env.SOURCE_BRANCH }}; then
+            echo "strategy=fast-forward" >> $GITHUB_OUTPUT
+            echo "✅ Fast-forward merge successful."
+
+          else
+            # Fall back to merge commit — preserves existing AMS commit hashes (no rebase)
+            if git merge origin/${{ env.SOURCE_BRANCH }} --no-edit \
+                -m "chore(sync): merge main into ${{ env.AMS_BRANCH }}"; then
+              echo "strategy=merge" >> $GITHUB_OUTPUT
+              echo "✅ Merge successful."
+            else
+              git merge --abort
+              echo "strategy=failed" >> $GITHUB_OUTPUT
+              echo "❌ Merge failed — manual intervention required."
+              exit 1
+            fi
+          fi
+
+          # Use SOURCE_TOKEN — GITHUB_TOKEN cannot push .github/workflows/ files.
+          # Unset the credential header set by checkout@v4, otherwise it overrides the remote URL token.
+          git config --local --unset-all "http.https://github.com/.extraheader" || true
+          git remote set-url origin https://x-access-token:${SOURCE_TOKEN}@github.com/${{ github.repository }}.git
+          git push origin ${{ env.AMS_BRANCH }}
+          SYNCED_SHA=$(git rev-parse HEAD)
+          echo "synced_sha=$SYNCED_SHA" >> $GITHUB_OUTPUT
+          echo "✅ AMS merge complete. Now at: $SYNCED_SHA"
+
+      # This repo has no patch-package/build.js layer at all -- templatization here is
+      # plain process.env reads (HLX_PROD_SERVER_HOST_PAGE/_LIVE, HLX_DOMAIN_PREFIX)
+      # added directly to first-party src/ files, falling back to the original
+      # hardcoded hlx.page/aem.page values when unset. So unlike the Lambda repos,
+      # the whole surface is first-party source -- this scan is the only check.
+      # Scoped to src/ only (not test/), since test fixtures are full of
+      # intentionally-literal example domains that aren't real candidates.
+      # Scans only ADDED lines from the merge's own diff (like the Adobe-SSA-EDS
+      # repos' domain-notify check), not the whole file content -- avoids
+      # re-flagging pre-existing, already-accepted literals every time an unrelated
+      # part of the same file gets touched by a later merge. Regex has no
+      # quote-boundary requirement and tolerates an escaped dot inside a RegExp
+      # literal (`aem\.` vs `aem.`) -- see aem-sidekick-ams's PR #7 finding for why
+      # `(aem|hlx)\\?\.` is used instead of a plain `\.aem\.` pattern.
+      - name: Scan Newly Merged Files for Templatization Candidates
+        id: templatization_scan
+        if: steps.merge_step.outcome == 'success'
+        run: |
+          PRE="${{ steps.changes_check.outputs.pre_merge_sha }}"
+          POST="${{ steps.merge_step.outputs.synced_sha }}"
+          CHANGED=$(git diff --name-only "$PRE" "$POST" -- 'src/**/*.js' 'src/**/*.mjs' || true)
+
+          FINDINGS=""
+          for f in $CHANGED; do
+            MATCHES=$(git diff "$PRE" "$POST" -- "$f" 2>/dev/null \
+              | awk '/^\+/ && !/^\+\+\+/' \
+              | grep -oE '(aem|hlx)\\?\.' \
+              | sort -u | paste -sd ',' - || true)
+            if [ -n "$MATCHES" ]; then
+              FINDINGS="${FINDINGS}${f}: ${MATCHES}\\n"
+            fi
+          done
+
+          if [ -n "$FINDINGS" ]; then
+            echo "has_candidates=true" >> $GITHUB_OUTPUT
+            echo "findings=$FINDINGS" >> $GITHUB_OUTPUT
+            echo "⚠️ Possible templatization candidates found in newly merged lines:"
+            echo -e "$FINDINGS"
+          else
+            echo "has_candidates=false" >> $GITHUB_OUTPUT
+            echo "✅ No hardcoded domain patterns found in newly merged src/ lines."
+          fi
+
+      # Slack-only, notify-only -- may be legitimate (e.g. a shared commercial-only
+      # site, not customer-specific) or may need templatizing -- can't tell
+      # automatically, so this is a human-review flag, not a blocking gate.
+      - name: Notify Slack on Templatization Candidates
+        if: steps.templatization_scan.outputs.has_candidates == 'true'
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "🔍 *Path 2 — Possible Env-Templatization Candidates*\n*Repo:* `${{ github.repository }}`\n*Synced to:* `${{ steps.merge_step.outputs.synced_sha }}`\nNewly merged lines in `src/` contain patterns that look like hardcoded domain values. Some may be intentional; others may need `process.env.HLX_PROD_SERVER_HOST_PAGE`/`_LIVE`/`HLX_DOMAIN_PREFIX`:\n```${{ steps.templatization_scan.outputs.findings }}```\n_Notify-only — the merge already completed; nothing is blocked._"
+            }
+
+      - name: Notify Slack on Conflict
+        if: failure() && steps.merge_step.outputs.strategy == 'failed'
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "⚠️ *Path 2 AMS Merge Conflict!*\n*Repo:* `${{ github.repository }}`\n*Version:* `${{ steps.version_check.outputs.latest_tag }}`\nCould not merge `${{ env.SOURCE_BRANCH }}` into `${{ env.AMS_BRANCH }}`.\n\nIssues are disabled on this repo (no tracking issue) -- resolve manually: fetch, merge, fix conflicts, push to `${{ env.AMS_BRANCH }}`, then re-run.\n*Workflow:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Failed Run>"
+            }
+
+      - name: Notify Slack on Skipped (no new release)
+        if: steps.version_check.outputs.is_minor == 'false'
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "⏭️ *Path 2 Skipped — No New Release*\n*Repo:* `${{ github.repository }}`\n*`main` version:* `${{ steps.version_check.outputs.latest_tag }}` (unchanged — no merge needed)\n*`${{ env.AMS_BRANCH }}` version:* `${{ steps.version_check.outputs.ams_tag }}` (current, unchanged)\n*Next sync:* when main's release version next changes, or force_sync manually"
+            }
+
+      - name: Notify Slack on No Changes
+        if: steps.version_check.outputs.is_minor == 'true' && steps.changes_check.outputs.has_changes == 'false'
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "⏭️ *Path 2 Skipped — Already Up To Date*\n*Repo:* `${{ github.repository }}`\n*Version:* `${{ steps.version_check.outputs.latest_tag }}`\n*Triggered by:* ${{ steps.version_check.outputs.trigger_reason }}\n*Branch:* `${{ env.AMS_BRANCH }}` already up to date with `${{ env.SOURCE_BRANCH }}`"
+            }
+
+      - name: Notify Slack on Success
+        if: steps.merge_step.outcome == 'success'
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "✅ *Path 2 AMS Merge Complete!*\n*Repo:* `${{ github.repository }}`\n*Version:* `${{ steps.version_check.outputs.latest_tag }}`\n*Triggered by:* ${{ steps.version_check.outputs.trigger_reason }}\n*From:* `${{ env.SOURCE_BRANCH }}`\n*Into:* `${{ env.AMS_BRANCH }}`\n*Strategy:* ${{ steps.merge_step.outputs.strategy }}\n*SHA:* `${{ steps.merge_step.outputs.synced_sha }}`"
+            }
+
+      - name: Notify Slack on Failure
+        if: failure() && steps.merge_step.outputs.strategy != 'failed'
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "⚠️ *Path 2 AMS Merge Failed!*\n*Repo:* `${{ github.repository }}`\n*Version:* `${{ steps.version_check.outputs.latest_tag }}`\n*Triggered by:* ${{ steps.version_check.outputs.trigger_reason }}\n*Merge step:* ${{ steps.merge_step.outcome }}\n*Workflow:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Failed Run>"
+            }
