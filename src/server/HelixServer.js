@@ -11,6 +11,7 @@
  */
 import crypto from 'crypto';
 import express from 'express';
+import { rateLimit } from 'express-rate-limit';
 import { promisify } from 'util';
 import path from 'path';
 import { lstat, readFile } from 'fs/promises';
@@ -20,9 +21,27 @@ import RequestContext from './RequestContext.js';
 import { asyncHandler, BaseServer } from './BaseServer.js';
 import LiveReload from './LiveReload.js';
 import { saveSiteTokenToFile } from '../config/config-utils.js';
+import { CONTENT_DIR } from '../content/content-shared.js';
+import { renderContentHtml } from '../content/content-html-pipeline.js';
+import { DA_IMS_CLIENT_ID, DA_IMS_SCOPE, startDaLoginRedirect } from '../content/da-auth.js';
 
 const LOGIN_ROUTE = '/.aem/cli/login';
 const LOGIN_ACK_ROUTE = '/.aem/cli/login/ack';
+const DA_LOGIN_ROUTE = '/.aem/cli/da-login';
+
+// Local dev-server only, but both routes trigger real side effects (a live server
+// bind on :9898, an outbound redirect to IMS) — cap abuse from a runaway page/script.
+const daContentAuthRateLimit = rateLimit({
+  windowMs: 60_000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// HTML folder candidate extensions, in lookup order.
+// First entry takes precedence when multiple candidates exist on disk.
+const HTML_FOLDER_EXTENSIONS = ['.html', '.plain.html'];
+const HTML_FOLDER_EXTENSIONS_PREFER_PLAIN = [...HTML_FOLDER_EXTENSIONS].reverse();
 
 export class HelixServer extends BaseServer {
   /**
@@ -63,13 +82,40 @@ export class HelixServer extends BaseServer {
     return this;
   }
 
-  withHtmlFolder(value) {
-    // It's now sanitized in HelixProject.withHtmlFolder
-    this._htmlFolder = value;
+  withHtmlFolder(folder, mount) {
+    this._htmlFolder = folder;
+    this._htmlMount = mount;
+    this._mountPrefix = mount.endsWith('/') ? mount : `${mount}/`;
     return this;
   }
 
+  withPreferPlainHtml(value) {
+    this._preferPlainHtml = value;
+    return this;
+  }
+
+  get mountPrefix() {
+    return this._mountPrefix;
+  }
+
   async handleLogin(req, res) {
+    const userAgent = req.headers['user-agent']?.toLowerCase();
+    if (userAgent?.includes('safari') && !userAgent?.includes('chrome')) {
+      res.status(403).send(`
+<p>It looks like you are using Safari to login via the AEM CLI...</p>
+<p>Unfortunately, the login flow is not supported at the moment in Safari. You can follow the progress at the following <a href="https://github.com/adobe/helix-cli/issues/2498">Github issue</a>.</p>
+<p>Please use Google Chrome or Mozilla Firefox in the meantime for login.</p>
+<p>To avoid changing your default browser, you can:</p>
+<ol>
+  <li>Start the CLI with the <strong>--no-open</strong> option to avoid opening the browser automatically</li>
+  <li>Open  Chrome or Firefox and login via the CLI</li>
+  <li>Close the CLI and start it again normally</li>
+</ol>
+<p>Once you are logged in, the token is available for 24h and you can do the rest of your work in your favorite browser.</p>
+`);
+      return;
+    }
+
     // disable autologin if login was called at least once
     this._autoLogin = false;
     // clear any previous login errors
@@ -84,6 +130,34 @@ export class HelixServer extends BaseServer {
     this._loginState = crypto.randomUUID();
     const loginUrl = `${this._project.siteLoginUrl}&state=${this._loginState}`;
     res.status(302).set('location', loginUrl).send('');
+  }
+
+  /**
+   * Kicks off the IMS login flow for a page that needs the da.live preview cookie
+   * (see {@link utils.injectDaContentAuthScript}). Redirects to IMS; the browser comes
+   * back to the `return` url (validated same-origin, to avoid leaking the token via an
+   * open redirect) with `#access_token=...` once the fixed :9898 callback catches it.
+   */
+  handleDaLogin(req, res) {
+    if (!req.query.return) {
+      res.status(400).send('Invalid or missing return url.');
+      return;
+    }
+    const expectedOrigin = `${req.protocol}://${req.get('host')}`;
+    let target;
+    try {
+      const parsed = new URL(req.query.return, expectedOrigin);
+      if (parsed.origin !== expectedOrigin) {
+        throw new Error('cross-origin return url');
+      }
+      target = parsed.href;
+    } catch (e) {
+      res.status(400).send('Invalid or missing return url.');
+      return;
+    }
+    this.log.debug(`Starting da.live login, returning to ${target} when done.`);
+    const authUrl = startDaLoginRedirect(target);
+    res.status(302).set('location', authUrl).send('');
   }
 
   async handleLoginAck(req, res) {
@@ -128,6 +202,7 @@ export class HelixServer extends BaseServer {
 
         this.withSiteToken(siteToken);
         this._project.headHtml.setSiteToken(siteToken);
+        this._project.metadataSheet?.setSiteToken(siteToken);
         await saveSiteTokenToFile(siteToken);
         this.log.info('Site token received and saved to file.');
 
@@ -156,59 +231,54 @@ export class HelixServer extends BaseServer {
   }
 
   /**
+   * Resolves a candidate file inside the HTML folder, returning its absolute path
+   * if it exists and passes the security check, or null otherwise.
+   * @param {string} relativePath path relative to HTML folder
+   * @returns {Promise<string|null>} absolute path, or null if missing/invalid
+   */
+  async resolveCandidate(relativePath) {
+    const file = path.resolve(
+      this._project.directory,
+      this._htmlFolder,
+      relativePath,
+    );
+
+    if (!utils.validatePathSecurity(file, this._project.directory)) {
+      return null;
+    }
+
+    try {
+      const stats = await lstat(file);
+      if (stats.isFile()) {
+        return file;
+      }
+    } catch (e) {
+      // not found
+    }
+    return null;
+  }
+
+  /**
    * Resolves which HTML file to serve from the HTML folder
    * @param {string} relativePath path relative to HTML folder
    * @returns {Promise<{file: string, isPlain: boolean}|null>} resolved file info or null
    */
   async resolveHtmlFolderFile(relativePath) {
-    // Security check: prevent path traversal with /../ anywhere in the path
-    if (relativePath.includes('/../')) {
-      return null;
-    }
-
     // Don't process if it already has an extension
     if (relativePath.includes('.')) {
       return null;
     }
 
-    // Try .html first
-    const htmlFile = path.resolve(
-      this._project.directory,
-      this._htmlFolder,
-      `${relativePath}.html`,
-    );
+    const candidates = this._preferPlainHtml
+      ? HTML_FOLDER_EXTENSIONS_PREFER_PLAIN
+      : HTML_FOLDER_EXTENSIONS;
 
-    if (!utils.validatePathSecurity(htmlFile, this._project.directory)) {
-      return null;
-    }
-
-    try {
-      const stats = await lstat(htmlFile);
-      if (stats.isFile()) {
-        return { file: htmlFile, isPlain: false };
+    for (const ext of candidates) {
+      // eslint-disable-next-line no-await-in-loop
+      const file = await this.resolveCandidate(`${relativePath}${ext}`);
+      if (file) {
+        return { file, isPlain: ext === '.plain.html' };
       }
-    } catch (e) {
-      // .html not found, try .plain.html
-    }
-
-    // Try .plain.html
-    const plainHtmlFile = path.resolve(
-      this._project.directory,
-      this._htmlFolder,
-      `${relativePath}.plain.html`,
-    );
-
-    if (!utils.validatePathSecurity(plainHtmlFile, this._project.directory)) {
-      return null;
-    }
-
-    try {
-      const stats = await lstat(plainHtmlFile);
-      if (stats.isFile()) {
-        return { file: plainHtmlFile, isPlain: true };
-      }
-    } catch (e) {
-      // Neither exists
     }
 
     return null;
@@ -246,21 +316,14 @@ export class HelixServer extends BaseServer {
    * @param {Function} next next middleware
    */
   async handleHtmlFolderRequest(req, res, next) {
-    if (!this._htmlFolder) {
-      return next();
-    }
-
-    // Use Express's req.path for pathname extraction
     const pathname = req.path;
-    const folderPrefix = `/${this._htmlFolder}/`;
 
-    // Check if the request is for the HTML folder
-    if (!pathname.startsWith(folderPrefix)) {
+    let relativePath;
+    if (pathname.startsWith(this._mountPrefix)) {
+      relativePath = pathname.slice(this._mountPrefix.length);
+    } else {
       return next();
     }
-
-    // Extract the path within the HTML folder
-    let relativePath = pathname.slice(folderPrefix.length);
 
     // Handle directory requests (trailing slash) by appending 'index'
     if (relativePath === '' || relativePath.endsWith('/')) {
@@ -270,6 +333,10 @@ export class HelixServer extends BaseServer {
     // Resolve which file to serve (.html or .plain.html)
     const resolvedFile = await this.resolveHtmlFolderFile(relativePath);
     if (!resolvedFile) {
+      // Serve static assets (e.g. .json) from the html-folder as-is
+      if (relativePath.includes('.')) {
+        return this.serveHtmlFolderStaticFile(req, res, next, relativePath);
+      }
       return next();
     }
 
@@ -308,6 +375,55 @@ export class HelixServer extends BaseServer {
     }
 
     log.debug(`served HTML file ${resolvedFile.file} for ${req.url}`);
+    return undefined;
+  }
+
+  /**
+   * Serves static files from the HTML folder as-is
+   * @param {Express.Request} req request
+   * @param {Express.Response} res response
+   * @param {Function} next next middleware
+   * @param {string} relativePath path relative to HTML folder
+   */
+  async serveHtmlFolderStaticFile(req, res, next, relativePath) {
+    if (relativePath.includes('/../') || relativePath.includes('..')) {
+      return next();
+    }
+
+    const filePath = path.resolve(
+      this._project.directory,
+      this._htmlFolder,
+      relativePath,
+    );
+
+    if (!utils.validatePathSecurity(
+      filePath,
+      this._project.directory,
+    )) {
+      return next();
+    }
+
+    try {
+      const stats = await lstat(filePath);
+      if (!stats.isFile()) {
+        return next();
+      }
+    } catch (e) {
+      return next();
+    }
+
+    const sendFile = promisify(res.sendFile).bind(res);
+    try {
+      await sendFile(filePath, {
+        dotfiles: 'allow',
+        headers: { 'access-control-allow-origin': '*' },
+      });
+      this.log.debug(
+        `served static file ${filePath} for ${req.url}`,
+      );
+    } catch (e) {
+      return next();
+    }
     return undefined;
   }
 
@@ -357,6 +473,120 @@ export class HelixServer extends BaseServer {
 
     // try to serve static
     try {
+      // Check content/ first — prefer local content checkout over proxy
+      const contentDir = path.join(this._project.directory, CONTENT_DIR);
+      const contentFilePath = path.join(contentDir, ctx.path);
+      if (!path.relative(contentDir, contentFilePath).startsWith('..')) {
+        try {
+          if (contentFilePath.endsWith('.html')) {
+            // readFile throws EISDIR for directories and ENOENT for missing files
+            // .plain.html is a virtual URL convention — AEM never stores .plain.html files,
+            // so always read the corresponding .html file and serve the <main> fragment.
+            const isPlainFallback = contentFilePath.endsWith('.plain.html');
+            const servedFilePath = isPlainFallback
+              ? `${contentFilePath.slice(0, -'.plain.html'.length)}.html`
+              : contentFilePath;
+            let htmlContent = await readFile(servedFilePath, 'utf-8');
+            htmlContent = utils.rewriteDaContentImageUrls(
+              htmlContent,
+              this._project.org,
+              this._project.site,
+            );
+            const previewOrigin = this._project.org && this._project.site
+              ? `https://main--${this._project.site}--${this._project.org}.preview.da.live`
+              : null;
+            // Content may already reference the preview host directly (not just via
+            // the content.da.live rewrite above), so gate on presence, not on rewrite.
+            const needsDaContentAuth = !!previewOrigin && htmlContent.includes(previewOrigin);
+            if (this._project.metadataSheet) {
+              this._project.metadataSheet.setCookie(req.headers.cookie || '');
+              await this._project.metadataSheet.ensureLoaded();
+            }
+            const metadataSheetRows = this._project.metadataSheet?.getRows();
+            if (isPlainFallback) {
+              if (liveReload) {
+                liveReload.registerFile(ctx.requestId, servedFilePath);
+              }
+              const rendered = await renderContentHtml(htmlContent, {
+                path: ctx.path,
+                log,
+                metadataSheetRows,
+                headers: req.headers,
+                org: this._project.org,
+                site: this._project.site,
+              });
+              const fragment = rendered ?? utils.extractMainContent(htmlContent);
+              res.set({
+                'content-type': 'text/html; charset=utf-8',
+                'access-control-allow-origin': '*',
+              });
+              res.send(fragment);
+              log.debug(`${pfx}served from ${CONTENT_DIR}/: ${ctx.path}`);
+              return;
+            }
+            await this._project.headHtml.update();
+            const headHtml = this._project.headHtml.localHtml || '';
+            const rendered = await renderContentHtml(htmlContent, {
+              path: ctx.path,
+              log,
+              headHtml,
+              metadataSheetRows,
+              headers: req.headers,
+              org: this._project.org,
+              site: this._project.site,
+            });
+            if (rendered !== null) {
+              htmlContent = rendered;
+            } else if (!htmlContent.includes('<head>')) {
+              // pipeline failed to render -- fall back to a minimal wrap so local dev never
+              // breaks outright on a rendering bug.
+              htmlContent = `<html><head>${headHtml}</head>${htmlContent}</html>`;
+            } else {
+              // content already had its own <head> -- still merge in the local head.html
+              htmlContent = htmlContent.replace(/<\/head>/i, `${headHtml}</head>`);
+            }
+            const proxyPageUrl = new URL(ctx.url, proxyUrl);
+            for (const [key, value] of proxyUrl.searchParams.entries()) {
+              proxyPageUrl.searchParams.append(key, value);
+            }
+            htmlContent = utils.injectMeta(htmlContent, {
+              'hlx:proxyUrl': proxyPageUrl.href,
+            });
+            if (needsDaContentAuth) {
+              htmlContent = utils.injectDaContentAuthScript(htmlContent, {
+                previewOrigin,
+                probePath: utils.findDaPreviewProbePath(htmlContent, previewOrigin),
+                clientId: DA_IMS_CLIENT_ID,
+                scope: DA_IMS_SCOPE,
+              });
+            }
+            if (liveReload) {
+              htmlContent = utils.injectLiveReloadScript(htmlContent, this);
+              liveReload.registerFile(ctx.requestId, contentFilePath);
+            }
+            res.set({
+              'content-type': 'text/html; charset=utf-8',
+              'access-control-allow-origin': '*',
+            });
+            res.send(htmlContent);
+            log.debug(`${pfx}served from ${CONTENT_DIR}/: ${ctx.path}`);
+            return;
+          }
+          // sendFile throws EISDIR for directories and ENOENT for missing files
+          await sendFile(contentFilePath, {
+            dotfiles: 'allow',
+            headers: { 'access-control-allow-origin': '*' },
+          });
+          if (liveReload) {
+            liveReload.registerFile(ctx.requestId, contentFilePath);
+          }
+          log.debug(`${pfx}served from ${CONTENT_DIR}/: ${ctx.path}`);
+          return;
+        } catch (e) {
+          log.debug(`${pfx}${CONTENT_DIR}/ miss for ${ctx.path}: ${e.code}`);
+        }
+      }
+
       // Check if it's an HTML file and live reload is enabled
       if (liveReload && filePath.endsWith('.html')) {
         // Read the HTML file and inject the livereload script
@@ -433,13 +663,18 @@ export class HelixServer extends BaseServer {
     this.app.get(LOGIN_ACK_ROUTE, asyncHandler(this.handleLoginAck.bind(this)));
     this.app.post(LOGIN_ACK_ROUTE, express.json(), asyncHandler(this.handleLoginAck.bind(this)));
     this.app.options(LOGIN_ACK_ROUTE, asyncHandler(this.handleLoginAck.bind(this)));
+    this.app.get(
+      '/__internal__/da-content-auth.js',
+      daContentAuthRateLimit,
+      (req, res) => utils.serveDaContentAuthScript(res),
+    );
+    this.app.get(DA_LOGIN_ROUTE, daContentAuthRateLimit, this.handleDaLogin.bind(this));
 
     // Add HTML folder handler before the general proxy handler
     if (this._htmlFolder) {
-      // Only handle GET requests for the HTML folder path
-      const htmlFolderPattern = new RegExp(`^/${this._htmlFolder}/.*`);
-      this.app.get(htmlFolderPattern, asyncHandler(this.handleHtmlFolderRequest.bind(this)));
-      this.log.info(`Serving HTML files from folder: ${this._htmlFolder}`);
+      const mountPattern = new RegExp(`^${this._mountPrefix}.*`);
+      this.app.get(mountPattern, asyncHandler(this.handleHtmlFolderRequest.bind(this)));
+      this.log.info(`Serving HTML files from folder: ${this._htmlFolder} at ${this._htmlMount}`);
     }
 
     const handler = asyncHandler(this.handleProxyModeRequest.bind(this));

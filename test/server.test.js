@@ -21,6 +21,7 @@ import { UnsecuredJWT } from 'jose';
 import path from 'path';
 import { h1NoCache } from '@adobe/fetch';
 import * as http from 'node:http';
+import esmock from 'esmock';
 import { HelixProject } from '../src/server/HelixProject.js';
 import {
   Nock, assertHttp, createTestRoot, setupProject, rawGet,
@@ -28,6 +29,7 @@ import {
 import { getFetch } from '../src/fetch-utils.js';
 import { getSiteTokenFromFile } from '../src/config/config-utils.js';
 import packageJson from '../src/package.cjs';
+import { CONTENT_DIR } from '../src/content/content-shared.js';
 
 describe('Helix Server', () => {
   let nock;
@@ -470,6 +472,112 @@ describe('Helix Server', () => {
     } finally {
       await project.stop();
     }
+  });
+
+  describe('da.live login redirect', () => {
+    it('redirects to the IMS authorize url for a same-origin return url', async () => {
+      // Mock startDaLoginRedirect: the real one starts a live callback server on
+      // :9898 that stays open for up to 5 minutes waiting for a token we'll never
+      // send, which would leak an open handle past the end of this test.
+      let calledWith;
+      const { HelixServer: MockedHelixServer } = await esmock('../src/server/HelixServer.js', {
+        '../src/content/da-auth.js': {
+          DA_IMS_CLIENT_ID: 'darkalley',
+          DA_IMS_SCOPE: 'AdobeID,openid',
+          startDaLoginRedirect: (finalRedirectUrl) => {
+            calledWith = finalRedirectUrl;
+            return 'https://ims-na1.adobelogin.com/ims/authorize/v2?client_id=darkalley&redirect_uri=http%3A%2F%2Flocalhost%3A9898%2Fcallback';
+          },
+        },
+      });
+      const { HelixProject: MockedHelixProject } = await esmock('../src/server/HelixProject.js', {
+        '../src/server/HelixServer.js': { HelixServer: MockedHelixServer },
+      });
+
+      const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
+      const project = new MockedHelixProject()
+        .withCwd(cwd)
+        .withHttpPort(0);
+      await project.init();
+      try {
+        await project.start();
+        const { port } = project.server;
+        const returnUrl = `http://127.0.0.1:${port}/index.html`;
+        const resp = await getFetch()(`http://127.0.0.1:${port}/.aem/cli/da-login?return=${encodeURIComponent(returnUrl)}`, {
+          cache: 'no-store',
+          redirect: 'manual',
+        });
+        assert.strictEqual(resp.status, 302);
+        const location = resp.headers.get('location');
+        assert.ok(location.startsWith('https://ims-na1.adobelogin.com/ims/authorize/v2?'));
+        assert.ok(location.includes('client_id=darkalley'));
+        assert.strictEqual(calledWith, returnUrl);
+      } finally {
+        await project.stop();
+      }
+    });
+
+    it('rejects a cross-origin return url', async () => {
+      const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
+      const project = new HelixProject()
+        .withCwd(cwd)
+        .withHttpPort(0);
+      await project.init();
+      try {
+        await project.start();
+        const { port } = project.server;
+        const resp = await getFetch()(`http://127.0.0.1:${port}/.aem/cli/da-login?return=${encodeURIComponent('https://evil.example/steal')}`, {
+          cache: 'no-store',
+          redirect: 'manual',
+        });
+        assert.strictEqual(resp.status, 400);
+      } finally {
+        await project.stop();
+      }
+    });
+
+    it('rejects a missing return url', async () => {
+      const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
+      const project = new HelixProject()
+        .withCwd(cwd)
+        .withHttpPort(0);
+      await project.init();
+      try {
+        await project.start();
+        const { port } = project.server;
+        const resp = await getFetch()(`http://127.0.0.1:${port}/.aem/cli/da-login`, {
+          cache: 'no-store',
+          redirect: 'manual',
+        });
+        assert.strictEqual(resp.status, 400);
+      } finally {
+        await project.stop();
+      }
+    });
+
+    it('rate-limits repeated requests', async () => {
+      const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
+      const project = new HelixProject()
+        .withCwd(cwd)
+        .withHttpPort(0);
+      await project.init();
+      try {
+        await project.start();
+        const { port } = project.server;
+        let lastStatus;
+        for (let i = 0; i < 21; i += 1) {
+          // eslint-disable-next-line no-await-in-loop
+          const resp = await getFetch()(`http://127.0.0.1:${port}/.aem/cli/da-login`, {
+            cache: 'no-store',
+            redirect: 'manual',
+          });
+          lastStatus = resp.status;
+        }
+        assert.strictEqual(lastStatus, 429);
+      } finally {
+        await project.stop();
+      }
+    });
   });
 
   it('starts auto login when receiving 401 during navigation', async () => {
@@ -1136,6 +1244,479 @@ describe('Helix Server', () => {
         assert.strictEqual(resp.status, 200);
         const body = await resp.text();
         assert.strictEqual(body, '<html><body>Nested content</body></html>');
+      } finally {
+        await project.stop();
+      }
+    });
+  });
+
+  describe('content/ serving', () => {
+    it('serves a plain file from content/ without hitting the proxy', async () => {
+      const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
+      await fse.ensureDir(path.join(cwd, CONTENT_DIR, 'blog'));
+      await fse.writeFile(path.join(cwd, CONTENT_DIR, 'blog', 'post.json'), '{"title":"local"}');
+
+      const project = new HelixProject()
+        .withCwd(cwd)
+        .withProxyUrl('http://main--foo--bar.aem.page')
+        .withHttpPort(0);
+      await project.init();
+      try {
+        await project.start();
+        const resp = await getFetch()(`http://127.0.0.1:${project.server.port}/blog/post.json`);
+        assert.strictEqual(resp.status, 200);
+        const body = await resp.text();
+        assert.strictEqual(body, '{"title":"local"}');
+      } finally {
+        await project.stop();
+      }
+    });
+
+    it('serves a body-only HTML file from content/ and injects head.html', async () => {
+      const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
+      await fse.ensureDir(path.join(cwd, CONTENT_DIR));
+      // da.live convention: body only (no <head>), each section its own top-level <div>
+      await fse.writeFile(
+        path.join(cwd, CONTENT_DIR, 'index.html'),
+        '<body><header></header><main><div><p>local content</p></div></main><footer></footer></body>',
+      );
+      await fse.writeFile(
+        path.join(cwd, 'head.html'),
+        '<link rel="stylesheet" href="/styles.css"/>',
+      );
+
+      nock('http://main--foo--bar.aem.page')
+        .get('/head.html')
+        .reply(200, '', { 'content-type': 'text/html' })
+        .get('/metadata.json')
+        .reply(200, { data: [] });
+
+      const project = new HelixProject()
+        .withCwd(cwd)
+        .withProxyUrl('http://main--foo--bar.aem.page')
+        .withHttpPort(0);
+      await project.init();
+      try {
+        await project.start();
+        const resp = await getFetch()(`http://127.0.0.1:${project.server.port}/index.html`);
+        assert.strictEqual(resp.status, 200);
+        const body = await resp.text();
+        assert.ok(body.includes('local content'));
+        assert.ok(body.includes('<head>'));
+        assert.ok(body.includes('/styles.css'));
+      } finally {
+        await project.stop();
+      }
+    });
+
+    it('rewrites :icon-name: syntax in content/ into an icon span', async () => {
+      const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
+      await fse.ensureDir(path.join(cwd, CONTENT_DIR));
+      await fse.writeFile(
+        path.join(cwd, CONTENT_DIR, 'index.html'),
+        '<body><main><div><p>Hello :smile: world</p></div></main></body>',
+      );
+      await fse.writeFile(
+        path.join(cwd, 'head.html'),
+        '<link rel="stylesheet" href="/styles.css"/>',
+      );
+
+      nock('http://main--foo--bar.aem.page')
+        .get('/head.html')
+        .reply(200, '', { 'content-type': 'text/html' })
+        .get('/metadata.json')
+        .reply(200, { data: [] });
+
+      const project = new HelixProject()
+        .withCwd(cwd)
+        .withProxyUrl('http://main--foo--bar.aem.page')
+        .withHttpPort(0);
+      await project.init();
+      try {
+        await project.start();
+        const resp = await getFetch()(`http://127.0.0.1:${project.server.port}/index.html`);
+        assert.strictEqual(resp.status, 200);
+        const body = await resp.text();
+        assert.ok(body.includes('<span class="icon icon-smile"></span>'));
+      } finally {
+        await project.stop();
+      }
+    });
+
+    it('strips content/ metadata block and injects meta tags in head', async () => {
+      const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
+      const recipeDir = path.join(cwd, CONTENT_DIR, 'ca', 'fr_ca', 'recipes');
+      await fse.ensureDir(recipeDir);
+      await fse.writeFile(
+        path.join(recipeDir, 'chicken.html'),
+        // da.live convention: metadata is its own section (top-level div under <main>)
+        '<body><main>'
+        + '<div><h1>Ramen</h1></div>'
+        + '<div><div class="metadata">'
+        + '<div><div><p>Total Time</p></div><div><p>00:17:30</p></div></div>'
+        + '<div><div><p>Yield</p></div><div><p>4 portions</p></div></div>'
+        + '</div></div>'
+        + '</main></body>',
+      );
+      await fse.writeFile(
+        path.join(cwd, 'head.html'),
+        '<link rel="stylesheet" href="/styles.css"/>',
+      );
+
+      nock('http://main--foo--bar.aem.page')
+        .get('/head.html')
+        .reply(200, '', { 'content-type': 'text/html' })
+        .get('/metadata.json')
+        .reply(200, {
+          data: [
+            {
+              URL: '/ca/fr_ca/**',
+              nav: '/ca/fr_ca/nav/nav',
+              footer: '/ca/fr_ca/footer/footer',
+              template: 'section',
+            },
+            {
+              URL: '/ca/fr_ca/recipes/**',
+              nav: '',
+              footer: '',
+              'nav-banners': '',
+              template: 'recipe',
+            },
+          ],
+          ':type': 'sheet',
+        });
+
+      const project = new HelixProject()
+        .withCwd(cwd)
+        .withProxyUrl('http://main--foo--bar.aem.page')
+        .withHttpPort(0);
+      await project.init();
+      try {
+        await project.start();
+        const { port } = project.server;
+        const resp = await getFetch()(`http://127.0.0.1:${port}/ca/fr_ca/recipes/chicken`);
+        assert.strictEqual(resp.status, 200);
+        const body = await resp.text();
+        assert.ok(!body.includes('<div class="metadata">'));
+        assert.ok(body.includes('name="total-time"'));
+        assert.ok(body.includes('content="00:17:30"'));
+        assert.ok(body.includes('property="og:title"'));
+        assert.ok(body.includes('content="Ramen"'));
+        assert.ok(body.includes(`property="og:url" content="https://127.0.0.1:${port}/ca/fr_ca/recipes/chicken"`));
+        assert.ok(body.includes('name="template"'));
+        assert.ok(body.includes('content="recipe"'));
+        assert.ok(!body.includes('content="section"'));
+        assert.ok(body.includes('name="nav"'));
+        assert.ok(body.includes('content="/ca/fr_ca/nav/nav"'));
+        assert.ok(body.includes('name="footer"'));
+        assert.ok(body.includes('content="/ca/fr_ca/footer/footer"'));
+        assert.ok(body.includes('<meta property="hlx:proxyUrl" content="http://main--foo--bar.aem.page/ca/fr_ca/recipes/chicken">'));
+      } finally {
+        await project.stop();
+      }
+    });
+
+    it('turns a content/ section-metadata block into section classes/data-attributes', async () => {
+      const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
+      await fse.ensureDir(path.join(cwd, CONTENT_DIR));
+      await fse.writeFile(
+        path.join(cwd, CONTENT_DIR, 'index.html'),
+        '<body><main><div>'
+        + '<h1>Ramen</h1>'
+        + '<div class="section-metadata">'
+        + '<div><div>style</div><div>highlight, dark</div></div>'
+        + '</div>'
+        + '</div></main></body>',
+      );
+      await fse.writeFile(
+        path.join(cwd, 'head.html'),
+        '<link rel="stylesheet" href="/styles.css"/>',
+      );
+
+      nock('http://main--foo--bar.aem.page')
+        .get('/head.html')
+        .reply(200, '', { 'content-type': 'text/html' })
+        .get('/metadata.json')
+        .reply(200, { data: [] });
+
+      const project = new HelixProject()
+        .withCwd(cwd)
+        .withProxyUrl('http://main--foo--bar.aem.page')
+        .withHttpPort(0);
+      await project.init();
+      try {
+        await project.start();
+        const resp = await getFetch()(`http://127.0.0.1:${project.server.port}/index.html`);
+        assert.strictEqual(resp.status, 200);
+        const body = await resp.text();
+        assert.ok(!body.includes('class="section-metadata"'));
+        assert.ok(body.includes('class="highlight dark"'));
+      } finally {
+        await project.stop();
+      }
+    });
+
+    it('falls back to raw content merged with local head.html when the pipeline fails to render', async () => {
+      const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
+      await fse.ensureDir(path.join(cwd, CONTENT_DIR));
+      // invalid json-ld makes html2md throw (ConstraintsError), forcing renderContentHtml
+      // to return null.
+      await fse.writeFile(
+        path.join(cwd, CONTENT_DIR, 'index.html'),
+        '<html><head><script type="application/ld+json">{not valid json</script></head>'
+        + '<body><main><div><p>local content</p></div></main></body></html>',
+      );
+      await fse.writeFile(
+        path.join(cwd, 'head.html'),
+        '<link rel="stylesheet" href="/styles.css"/>',
+      );
+
+      nock('http://main--foo--bar.aem.page')
+        .get('/head.html')
+        .reply(200, '', { 'content-type': 'text/html' })
+        .get('/metadata.json')
+        .reply(200, { data: [] });
+
+      const project = new HelixProject()
+        .withCwd(cwd)
+        .withProxyUrl('http://main--foo--bar.aem.page')
+        .withHttpPort(0);
+      await project.init();
+      try {
+        await project.start();
+        const resp = await getFetch()(`http://127.0.0.1:${project.server.port}/index.html`);
+        assert.strictEqual(resp.status, 200);
+        const body = await resp.text();
+        assert.ok(body.includes('local content'), 'should still serve the raw content on failure');
+        assert.ok(body.includes('/styles.css'), 'should still merge local head.html on failure');
+        assert.ok(body.includes('{not valid json'), 'raw content is served as-is, unprocessed');
+      } finally {
+        await project.stop();
+      }
+    });
+
+    it('rewrites content.da.live image src to the site preview domain', async () => {
+      const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
+      await fse.ensureDir(path.join(cwd, CONTENT_DIR));
+      await fse.writeFile(
+        path.join(cwd, CONTENT_DIR, 'index.html'),
+        '<body><header></header><main><div><img src="https://content.da.live/bar/foo/media_123.png"></div></main><footer></footer></body>',
+      );
+      await fse.writeFile(
+        path.join(cwd, 'head.html'),
+        '<link rel="stylesheet" href="/styles.css"/>',
+      );
+
+      nock('http://main--foo--bar.aem.page')
+        .get('/head.html')
+        .reply(200, '', { 'content-type': 'text/html' })
+        .get('/metadata.json')
+        .reply(200, { data: [] });
+
+      const project = new HelixProject()
+        .withCwd(cwd)
+        .withProxyUrl('http://main--foo--bar.aem.page')
+        .withSite('foo')
+        .withOrg('bar')
+        .withHttpPort(0);
+      await project.init();
+      try {
+        await project.start();
+        const resp = await getFetch()(`http://127.0.0.1:${project.server.port}/index.html`);
+        assert.strictEqual(resp.status, 200);
+        const body = await resp.text();
+        assert.ok(body.includes('src="https://main--foo--bar.preview.da.live/media_123.png"'));
+        assert.ok(!body.includes('src="https://content.da.live'));
+        assert.ok(body.includes('window.DaContentAuthConfig={"previewOrigin":"https://main--foo--bar.preview.da.live","probePath":"/media_123.png","clientId":"darkalley"'));
+        assert.ok(body.includes('src="/__internal__/da-content-auth.js"'));
+      } finally {
+        await project.stop();
+      }
+    });
+
+    it('does not inject the da.live auth bootstrap when no image src is rewritten', async () => {
+      const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
+      await fse.ensureDir(path.join(cwd, CONTENT_DIR));
+      await fse.writeFile(
+        path.join(cwd, CONTENT_DIR, 'index.html'),
+        '<body><header></header><main><div><p>no images here</p></div></main><footer></footer></body>',
+      );
+      await fse.writeFile(
+        path.join(cwd, 'head.html'),
+        '<link rel="stylesheet" href="/styles.css"/>',
+      );
+
+      nock('http://main--foo--bar.aem.page')
+        .get('/head.html')
+        .reply(200, '', { 'content-type': 'text/html' })
+        .get('/metadata.json')
+        .reply(200, { data: [] });
+
+      const project = new HelixProject()
+        .withCwd(cwd)
+        .withProxyUrl('http://main--foo--bar.aem.page')
+        .withSite('foo')
+        .withOrg('bar')
+        .withHttpPort(0);
+      await project.init();
+      try {
+        await project.start();
+        const resp = await getFetch()(`http://127.0.0.1:${project.server.port}/index.html`);
+        assert.strictEqual(resp.status, 200);
+        const body = await resp.text();
+        assert.ok(!body.includes('DaContentAuthConfig'));
+        assert.ok(!body.includes('/__internal__/da-content-auth.js'));
+      } finally {
+        await project.stop();
+      }
+    });
+
+    it('injects the da.live auth bootstrap when content already references the preview host directly', async () => {
+      const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
+      await fse.ensureDir(path.join(cwd, CONTENT_DIR));
+      await fse.writeFile(
+        path.join(cwd, CONTENT_DIR, 'index.html'),
+        '<body><header></header><main><div><img src="https://main--foo--bar.preview.da.live/media_123.png"></div></main><footer></footer></body>',
+      );
+      await fse.writeFile(
+        path.join(cwd, 'head.html'),
+        '<link rel="stylesheet" href="/styles.css"/>',
+      );
+
+      nock('http://main--foo--bar.aem.page')
+        .get('/head.html')
+        .reply(200, '', { 'content-type': 'text/html' })
+        .get('/metadata.json')
+        .reply(200, { data: [] });
+
+      const project = new HelixProject()
+        .withCwd(cwd)
+        .withProxyUrl('http://main--foo--bar.aem.page')
+        .withSite('foo')
+        .withOrg('bar')
+        .withHttpPort(0);
+      await project.init();
+      try {
+        await project.start();
+        const resp = await getFetch()(`http://127.0.0.1:${project.server.port}/index.html`);
+        assert.strictEqual(resp.status, 200);
+        const body = await resp.text();
+        assert.ok(body.includes('window.DaContentAuthConfig={"previewOrigin":"https://main--foo--bar.preview.da.live","probePath":"/media_123.png","clientId":"darkalley"'));
+        assert.ok(body.includes('src="/__internal__/da-content-auth.js"'));
+      } finally {
+        await project.stop();
+      }
+    });
+
+    it('falls through to proxy when file is not in content/', async () => {
+      const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
+      await fse.ensureDir(path.join(cwd, CONTENT_DIR));
+      // content/ exists but does NOT contain /page.html
+
+      nock('http://main--foo--bar.aem.page')
+        .get('/page.html')
+        .reply(200, '<html><body>from proxy</body></html>', { 'content-type': 'text/html' })
+        .get('/head.html')
+        .reply(200, '', { 'content-type': 'text/html' });
+
+      const project = new HelixProject()
+        .withCwd(cwd)
+        .withProxyUrl('http://main--foo--bar.aem.page')
+        .withHttpPort(0);
+      await project.init();
+      try {
+        await project.start();
+        const resp = await getFetch()(`http://127.0.0.1:${project.server.port}/page.html`);
+        assert.strictEqual(resp.status, 200);
+        const body = await resp.text();
+        assert.ok(body.includes('from proxy'));
+      } finally {
+        await project.stop();
+      }
+    });
+
+    it('does not serve directories from content/', async () => {
+      const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
+      await fse.ensureDir(path.join(cwd, CONTENT_DIR, 'blog'));
+
+      nock('http://main--foo--bar.aem.page')
+        .get('/blog')
+        .reply(200, '<html><body>proxy blog index</body></html>', { 'content-type': 'text/html' })
+        .get('/head.html')
+        .reply(200, '', { 'content-type': 'text/html' });
+
+      const project = new HelixProject()
+        .withCwd(cwd)
+        .withProxyUrl('http://main--foo--bar.aem.page')
+        .withHttpPort(0);
+      await project.init();
+      try {
+        await project.start();
+        const resp = await getFetch()(`http://127.0.0.1:${project.server.port}/blog`);
+        // Should not serve the directory — fall through to proxy
+        const body = await resp.text();
+        assert.ok(body.includes('proxy blog index'));
+      } finally {
+        await project.stop();
+      }
+    });
+
+    it('prefers content/ over proxy even when project dir has no such file', async () => {
+      const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
+      await fse.ensureDir(path.join(cwd, CONTENT_DIR));
+      await fse.writeFile(
+        path.join(cwd, CONTENT_DIR, 'data.json'),
+        '{"source":"content"}',
+      );
+
+      // Proxy should NOT be called for this path
+      const project = new HelixProject()
+        .withCwd(cwd)
+        .withProxyUrl('http://main--foo--bar.aem.page')
+        .withHttpPort(0);
+      await project.init();
+      try {
+        await project.start();
+        const resp = await getFetch()(`http://127.0.0.1:${project.server.port}/data.json`);
+        assert.strictEqual(resp.status, 200);
+        const body = await resp.text();
+        assert.strictEqual(body, '{"source":"content"}');
+      } finally {
+        await project.stop();
+      }
+    });
+
+    it('serves .plain.html from content/ by falling back to the .html file', async () => {
+      const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
+      await fse.ensureDir(path.join(cwd, CONTENT_DIR));
+      // Only content/foo.html exists on disk — no content/foo.plain.html
+      // The stored .html file is a full document; .plain.html must return only the inner fragment
+      const innerFragment = `<div>
+  <p><a href="/">Home</a></p>
+</div>
+<div>
+  <ul>
+    <li><a href="/about">About</a></li>
+  </ul>
+</div>`;
+      await fse.writeFile(
+        path.join(cwd, CONTENT_DIR, 'foo.html'),
+        `<html><head><title>Foo</title></head><body><header></header><main>${innerFragment}</main><footer></footer></body></html>`,
+      );
+
+      // Proxy must not be called — if it is, the test will fail via nock
+      const project = new HelixProject()
+        .withCwd(cwd)
+        .withProxyUrl('http://main--foo--bar.aem.page')
+        .withHttpPort(0);
+      await project.init();
+      try {
+        await project.start();
+        const resp = await getFetch()(`http://127.0.0.1:${project.server.port}/foo.plain.html`);
+        assert.strictEqual(resp.status, 200);
+        const body = await resp.text();
+        // tolerate leading/trailing space due to pipeline pretty-printing
+        assert.strictEqual(body.trim(), innerFragment.trim());
       } finally {
         await project.stop();
       }

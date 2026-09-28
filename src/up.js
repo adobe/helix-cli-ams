@@ -117,8 +117,19 @@ export default function up() {
         })
         .option('html-folder', {
           alias: 'htmlFolder',
-          describe: 'Serve HTML files from this folder without extensions (e.g., /folder/file serves folder/file.html or folder/file.plain.html) use this to preview content changes if you do not have access to the authoring system',
+          describe: 'Serve HTML files from this folder without extensions. Defaults to serving at /FOLDER.',
           type: 'string',
+        })
+        .option('html-mount', {
+          alias: 'htmlMount',
+          describe: 'URL path where html-folder files are served (e.g., / for root). Defaults to /FOLDER.',
+          type: 'string',
+        })
+        .option('prefer-plain-html', {
+          alias: 'preferPlainHtml',
+          describe: 'When --html-folder is set, prefer <stem>.plain.html over <stem>.html if both exist.',
+          type: 'boolean',
+          default: false,
         })
 
         .help();
@@ -147,6 +158,8 @@ export default function up() {
         .withCache(argv.alphaCache)
         .withCookies(argv.cookies)
         .withHtmlFolder(argv.htmlFolder)
+        .withHtmlMount(argv.htmlMount)
+        .withPreferPlainHtml(argv.preferPlainHtml)
         .run();
     },
   };

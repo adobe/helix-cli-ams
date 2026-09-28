@@ -26,8 +26,9 @@ $ aem --help
 Usage: aem <command> [options]
 
 Commands:
-  aem up  Run a AEM development server
-  aem import  Run the AEM import server
+  aem up       Run a AEM development server
+  aem import   Run the AEM import server
+  aem content  Manage local da.live content
 
 Options:
   --version                Show version number                         [boolean]
@@ -79,13 +80,17 @@ This feature is especially helpful when:
 The `--html-folder` option enables serving HTML files without extensions, useful for previewing content changes when you don't have access to the authoring system.
 
 ```
-$ aem up --html-folder content
+$ aem up --html-folder drafts                      # serves at /drafts/*
+$ aem up --html-folder html --html-mount /       # serves at /* (root)
+$ aem up --html-folder drafts --html-mount /preview # serves at /preview/*
 ```
+
+Use `--html-mount` to control the URL path where files are served. Without it, files are served at `/FOLDER/*`.
 
 This enables two features:
 
-1. **Extension-less URLs**: Access `/content/page` to serve `content/page.html`
-2. **Plain HTML with metadata**: Create `content/page.plain.html` files that are automatically wrapped with proper HTML structure and metadata processing
+1. **Extension-less URLs**: Access `/drafts/page` (or `/page` with root mount) to serve the corresponding `.html` file
+2. **Plain HTML with metadata**: Create `.plain.html` files that are automatically wrapped with proper HTML structure and metadata processing
 
 #### Plain HTML files (.plain.html)
 
@@ -93,6 +98,12 @@ Plain HTML files contain only the main content and an optional metadata block. T
 - Wraps content in `<html><head><body><header><main><footer>` structure
 - Merges in `head.html` content
 - The metadata block is removed from the rendered content and converted to meta tags in the `<head>`.
+
+When a request resolves to `<stem>`, the CLI looks up `<stem>.html` first and falls back to `<stem>.plain.html`. Pass `--preferPlainHtml` to reverse this order — useful when you keep both files side-by-side and want the plain version to win:
+
+```
+$ aem up --html-folder drafts --preferPlainHtml
+```
 
 ### setting up a self-signed cert for using https
 
@@ -181,7 +192,9 @@ If present, `ALL_PROXY` is used as fallback if there is no other match.
 | `--livereload`    | `AEM_LIVERELOAD`    | `true`      | Enable automatic reloading of modified sources in browser.  |
 | `--no-livereload` | `AEM_NO_LIVERELOAD` | `false`     | Disable live-reload.                                        |
 | `--forward-browser-logs` | `AEM_FORWARD_BROWSER_LOGS` | `false` | Forward browser console logs to terminal.            |
-| `--html-folder`   | `AEM_HTML_FOLDER`   | undefined   | Serve HTML files from folder without extensions. Supports .html and .plain.html files. |
+| `--html-folder`   | `AEM_HTML_FOLDER`   | undefined   | Serve HTML files from folder without extensions. |
+| `--html-mount`    | `AEM_HTML_MOUNT`    | `/FOLDER`   | URL path where html-folder files are served. |
+| `--prefer-plain-html` | `AEM_PREFER_PLAIN_HTML` | `false` | Prefer `<stem>.plain.html` over `<stem>.html` when both exist. |
 | `--open`          | `AEM_OPEN`          | `/`         | Open a browser window at specified path after server start. |
 | `--no-open`       | `AEM_NO_OPEN`       | `false`     | Disable automatic opening of browser window.                |
 | `--tls-key`       | `AEM_TLS_KEY`       | undefined   | Path to .key file (for enabling TLS)                        |
@@ -197,6 +210,24 @@ $ aem import
 ```
 
 Read the full AEM Importer [documentation](https://github.com/adobe/helix-importer-ui).
+
+## Managing content
+
+The `aem content` commands let you check out content from da.live locally, make bulk edits, and push changes back. The local content lives in a `content/` folder in your project.
+
+| Command | Description |
+|---------|-------------|
+| `aem content clone` | Clone da.live content locally into `content/` |
+| `aem content status` | Show locally added, modified, and deleted content files |
+| `aem content diff` | Show diff between local and remote content |
+| `aem content merge` | Merge remote content into local files |
+| `aem content add` | Stage changes in `content/` (like `git add`) |
+| `aem content commit` | Commit staged changes in `content/` (like `git commit`) |
+| `aem content push` | Push committed `content/` changes to da.live (use `content add` & `content commit` first) |
+
+### Local content serving
+
+When a `content/` folder is present, `aem up` automatically serves content from it first, falling back to the proxy for any files not found locally. HTML files in `content/` are wrapped with `head.html` and have their metadata blocks processed, so pages render the same way they would when served from da.live.
 
 # Developing AEM CLI
 

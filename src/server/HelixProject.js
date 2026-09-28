@@ -15,6 +15,7 @@ import { IgnoreConfig } from '@adobe/helix-shared-config';
 import { HelixServer } from './HelixServer.js';
 import { BaseProject } from './BaseProject.js';
 import HeadHtmlSupport from './HeadHtmlSupport.js';
+import MetadataSheetSupport from './MetadataSheetSupport.js';
 import Indexer from './Indexer.js';
 
 export class HelixProject extends BaseProject {
@@ -22,6 +23,7 @@ export class HelixProject extends BaseProject {
     super(HelixServer);
     this._proxyUrl = null;
     this._headHtml = null;
+    this._metadataSheet = null;
     this._indexer = null;
     this._printIndex = false;
     this._allowInsecure = false;
@@ -42,6 +44,7 @@ export class HelixProject extends BaseProject {
   withSiteToken(value) {
     this.siteToken = value;
     this._server.withSiteToken(value);
+    this._metadataSheet?.setSiteToken(value);
     return this;
   }
 
@@ -86,13 +89,18 @@ export class HelixProject extends BaseProject {
       if (path.isAbsolute(value) || value.includes('..') || value.startsWith('/')) {
         throw new Error(`Invalid HTML folder name: ${value} only folders within the current workspace are allowed`);
       }
-
       this._htmlFolder = value;
-      this._server.withHtmlFolder(value);
-    } else {
-      this._htmlFolder = value;
-      this._server.withHtmlFolder(value);
     }
+    return this;
+  }
+
+  withHtmlMount(value) {
+    this._htmlMount = value;
+    return this;
+  }
+
+  withPreferPlainHtml(value) {
+    this._preferPlainHtml = value;
     return this;
   }
 
@@ -133,6 +141,10 @@ export class HelixProject extends BaseProject {
     return this._headHtml;
   }
 
+  get metadataSheet() {
+    return this._metadataSheet;
+  }
+
   get htmlFolder() {
     return this._htmlFolder;
   }
@@ -142,6 +154,11 @@ export class HelixProject extends BaseProject {
   }
 
   async init() {
+    if (this._htmlFolder) {
+      const mount = this._htmlMount || `/${this._htmlFolder}`;
+      this._server.withHtmlFolder(this._htmlFolder, mount);
+      this._server.withPreferPlainHtml(this._preferPlainHtml);
+    }
     await super.init();
     this._indexer = new Indexer()
       .withLogger(this._logger)
@@ -184,6 +201,17 @@ export class HelixProject extends BaseProject {
     }
   }
 
+  async initMetadataSheet() {
+    if (this.proxyUrl) {
+      this._metadataSheet = new MetadataSheetSupport({
+        proxyUrl: this.proxyUrl,
+        log: this.log,
+        allowInsecure: this.allowInsecure,
+        siteToken: this.siteToken,
+      });
+    }
+  }
+
   async init404Html() {
     if (this.proxyUrl) {
       this._file404html = resolve(this.directory, '404.html');
@@ -206,7 +234,10 @@ export class HelixProject extends BaseProject {
         await lstat(htmlFolderPath);
         this.log.debug(`Registered HTML folder for live-reload: ${this._htmlFolder}`);
         // Watch all HTML files in the folder - only .html extension
-        this.liveReload.registerFiles([`${htmlFolderPath}/**/*.html`], `/${this._htmlFolder}/`);
+        this.liveReload.registerFiles([
+          `${htmlFolderPath}/**/*.html`,
+          `${htmlFolderPath}/**/*.json`,
+        ], this._server.mountPrefix);
       } catch (e) {
         this.log.error(`HTML folder '${this._htmlFolder}' does not exist`);
         throw new Error(`HTML folder '${this._htmlFolder}' does not exist`);
@@ -245,6 +276,7 @@ export class HelixProject extends BaseProject {
     this.log.debug('Launching AEM dev server...');
     await super.start();
     await this.initHeadHtml();
+    await this.initMetadataSheet();
     await this.init404Html();
     await this.initHtmlFolder();
     await this.initHlxIgnore();
