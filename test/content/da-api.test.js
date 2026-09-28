@@ -123,12 +123,15 @@ describe('DaClient', () => {
       const original = process.env.DA_DOMAIN;
       process.env.DA_DOMAIN = 'gov-da.live';
       try {
+        // eslint-disable-next-line import/no-unresolved
+        const { DaClient: ConfiguredDaClient } = await import('../../src/content/da-api.js?configured-da-domain');
         let calledUrl;
-        client.fetch = async (url) => {
+        const configuredClient = new ConfiguredDaClient('test-token');
+        configuredClient.fetch = async (url) => {
           calledUrl = url;
           return mockResponse(200, []);
         };
-        await client.list('myorg', 'myrepo', '/some/path');
+        await configuredClient.list('myorg', 'myrepo', '/some/path');
         assert.strictEqual(calledUrl, 'https://admin.gov-da.live/list/myorg/myrepo/some/path');
       } finally {
         if (original === undefined) {

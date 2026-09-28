@@ -492,9 +492,8 @@ export class HelixServer extends BaseServer {
               this._project.org,
               this._project.site,
             );
-            const daDomain = process.env.DA_DOMAIN || 'da.live';
             const previewOrigin = this._project.org && this._project.site
-              ? `https://main--${this._project.site}--${this._project.org}.preview.${daDomain}`
+              ? `https://main--${this._project.site}--${this._project.org}.preview.${process.env.DA_DOMAIN}`
               : null;
             // Content may already reference the preview host directly (not just via
             // the configured DA content-domain rewrite above), so gate on presence, not on rewrite.

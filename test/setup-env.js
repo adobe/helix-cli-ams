@@ -14,3 +14,8 @@ import { fileURLToPath } from 'url';
 
 // eslint-disable-next-line no-underscore-dangle
 global.__rootdir = resolve(fileURLToPath(import.meta.url), '..', '..');
+
+process.env.DA_DOMAIN ??= 'da.live';
+process.env.DA_DOMAIN_CONTENT ??= 'content.da.live';
+process.env.HLX_PROD_SERVER_HOST_PAGE ??= 'aem.page';
+process.env.HLX_PROD_SERVER_HOST_LIVE ??= 'aem.live';

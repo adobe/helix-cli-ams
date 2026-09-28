@@ -809,10 +809,8 @@ window.LiveReloadOptions = {
     if (!org || !site) {
       return html;
     }
-    const contentDomain = process.env.DA_DOMAIN_CONTENT || 'content.da.live';
-    const daDomain = process.env.DA_DOMAIN || 'da.live';
-    const from = `https://${contentDomain}/${org}/${site}/`;
-    const to = `https://main--${site}--${org}.preview.${daDomain}/`;
+    const from = `https://${process.env.DA_DOMAIN_CONTENT}/${org}/${site}/`;
+    const to = `https://main--${site}--${org}.preview.${process.env.DA_DOMAIN}/`;
     return html.split(from).join(to);
   },
 
