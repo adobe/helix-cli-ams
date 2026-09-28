@@ -873,6 +873,33 @@ describe('Integration test for up command with cache', function suite() {
     }
   });
 
+  it('uses the configured page domain in invalid git remote guidance', async () => {
+    const original = process.env.HLX_PROD_SERVER_HOST_PAGE;
+    const errors = [];
+    const logger = new Proxy({}, {
+      get: (_, property) => (property === 'error'
+        ? (message) => errors.push(message)
+        : () => {}),
+    });
+    process.env.HLX_PROD_SERVER_HOST_PAGE = 'gov-aem.page';
+    try {
+      initGit(testDir, 'user@example.ghe.com:ACMEGROUP/acme-eds.git');
+      const cmd = new UpCommand(logger)
+        .withLiveReload(false)
+        .withDirectory(testDir);
+      await assert.rejects(() => cmd.init(), /Invalid git remote origin URL/);
+      assert(errors.some((message) => message.includes(
+        'aem up --url https://main--<repo>--<owner>.gov-aem.page',
+      )));
+    } finally {
+      if (original === undefined) {
+        delete process.env.HLX_PROD_SERVER_HOST_PAGE;
+      } else {
+        process.env.HLX_PROD_SERVER_HOST_PAGE = original;
+      }
+    }
+  });
+
   it('starts successfully when non-parseable SSH origin is paired with --url', async () => {
     initGit(testDir, 'user@example.ghe.com:ACMEGROUP/acme-eds.git');
     const cmd = new UpCommand()

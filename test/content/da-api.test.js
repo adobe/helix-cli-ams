@@ -119,6 +119,26 @@ describe('DaClient', () => {
       assert.strictEqual(calledUrl, 'https://admin.da.live/list/myorg/myrepo/some/path');
     });
 
+    it('uses the configured DA domain', async () => {
+      const original = process.env.DA_DOMAIN;
+      process.env.DA_DOMAIN = 'gov-da.live';
+      try {
+        let calledUrl;
+        client.fetch = async (url) => {
+          calledUrl = url;
+          return mockResponse(200, []);
+        };
+        await client.list('myorg', 'myrepo', '/some/path');
+        assert.strictEqual(calledUrl, 'https://admin.gov-da.live/list/myorg/myrepo/some/path');
+      } finally {
+        if (original === undefined) {
+          delete process.env.DA_DOMAIN;
+        } else {
+          process.env.DA_DOMAIN = original;
+        }
+      }
+    });
+
     it('passes auth header', async () => {
       let calledHeaders;
       client.fetch = async (url, opts) => {

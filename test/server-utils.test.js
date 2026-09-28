@@ -368,6 +368,31 @@ describe('Utils Test', () => {
       );
     });
 
+    it('uses configured DA content and preview domains', () => {
+      const originalDaDomain = process.env.DA_DOMAIN;
+      const originalContentDomain = process.env.DA_DOMAIN_CONTENT;
+      process.env.DA_DOMAIN = 'gov-da.live';
+      process.env.DA_DOMAIN_CONTENT = 'content.gov-da.live';
+      try {
+        const html = '<img src="https://content.gov-da.live/bar/foo/media_123.png">';
+        assert.strictEqual(
+          utils.rewriteDaContentImageUrls(html, 'bar', 'foo'),
+          '<img src="https://main--foo--bar.preview.gov-da.live/media_123.png">',
+        );
+      } finally {
+        if (originalDaDomain === undefined) {
+          delete process.env.DA_DOMAIN;
+        } else {
+          process.env.DA_DOMAIN = originalDaDomain;
+        }
+        if (originalContentDomain === undefined) {
+          delete process.env.DA_DOMAIN_CONTENT;
+        } else {
+          process.env.DA_DOMAIN_CONTENT = originalContentDomain;
+        }
+      }
+    });
+
     it('does not rewrite urls for a different org/site', () => {
       const html = '<img src="https://content.da.live/other/site/media_123.png">';
       assert.strictEqual(

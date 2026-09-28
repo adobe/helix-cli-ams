@@ -797,8 +797,8 @@ window.LiveReloadOptions = {
   },
 
   /**
-   * Rewrites da.live content-store image URLs (`https://content.da.live/${org}/${site}/...`)
-   * to the site's preview domain, since content.da.live is not publicly reachable
+   * Rewrites DA content-store image URLs to the site's DA preview domain,
+   * since the content store is not publicly reachable
    * for rendering images during local dev.
    * @param {string} html html content
    * @param {string} org da.live org
@@ -809,8 +809,10 @@ window.LiveReloadOptions = {
     if (!org || !site) {
       return html;
     }
-    const from = `https://content.da.live/${org}/${site}/`;
-    const to = `https://main--${site}--${org}.preview.da.live/`;
+    const contentDomain = process.env.DA_DOMAIN_CONTENT || 'content.da.live';
+    const daDomain = process.env.DA_DOMAIN || 'da.live';
+    const from = `https://${contentDomain}/${org}/${site}/`;
+    const to = `https://main--${site}--${org}.preview.${daDomain}/`;
     return html.split(from).join(to);
   },
 
@@ -820,7 +822,7 @@ window.LiveReloadOptions = {
    * the site's root document is often served regardless of auth, only assets are
    * gated, so probing `/` would give a false "already authorized" reading.
    * @param {string} html html content
-   * @param {string} previewOrigin e.g. `https://main--site--org.preview.da.live`
+   * @param {string} previewOrigin e.g. `https://main--site--org.preview.<DA domain>`
    * @returns {string} an absolute path (starting with `/`), defaults to `/` if none found
    */
   findDaPreviewProbePath(html, previewOrigin) {
