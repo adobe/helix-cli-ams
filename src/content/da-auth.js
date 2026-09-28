@@ -74,7 +74,7 @@ function isTokenExpired(stored) {
  * The fragment never reaches the server, so /callback serves a tiny HTML page
  * that reads the fragment via JS and forwards the token to /token, then
  * redirects the browser on success — to `finalRedirectUrl` (with the token appended
- * as a URL fragment) when given, otherwise to https://tools.aem.live/cli/logged-in.
+ * as a URL fragment) when given, otherwise to the configured tools host.
  *
  * @param {string} [finalRedirectUrl] where to send the browser after login,
  *   used by the `aem up` dev-server login flow to return to the page that
@@ -103,7 +103,7 @@ function waitForToken(finalRedirectUrl) {
   const dest = token
     ? '/token?access_token=' + encodeURIComponent(token) + (expiresIn ? '&expires_in=' + encodeURIComponent(expiresIn) : '')
     : '/token?error=' + encodeURIComponent(error || 'unknown');
-  const loggedInUrl = ${JSON.stringify(finalRedirectUrl || 'https://tools.aem.live/cli/logged-in')};
+  const loggedInUrl = ${JSON.stringify(finalRedirectUrl || `https://tools.${process.env.HLX_PROD_SERVER_HOST_LIVE}/cli/logged-in`)};
   if (!token) {
     fetch(dest);
     document.body.innerHTML = '<h2>Login failed.</h2>';
