@@ -56,8 +56,10 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage/lcov.info,./packages/browser-injectables/coverage/lcov.info
           flags: unittests,browsertests
+      # package.json points semantic-release at upstream adobe/helix-cli, where main-ams
+      # does not exist, so semantic-release cannot validate it as a release branch.
       - name: Semantic Release (Dry Run)
-        if: github.actor != 'dependabot[bot]'
+        if: github.actor != 'dependabot[bot]' && github.ref != 'refs/heads/main-ams'
         run: npm run semantic-release-dry
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
