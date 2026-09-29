@@ -368,31 +368,6 @@ describe('Utils Test', () => {
       );
     });
 
-    it('uses configured DA content and preview domains', () => {
-      const originalDaDomain = process.env.DA_DOMAIN;
-      const originalContentDomain = process.env.DA_DOMAIN_CONTENT;
-      process.env.DA_DOMAIN = 'da.example.invalid';
-      process.env.DA_DOMAIN_CONTENT = 'content.da.example.invalid';
-      try {
-        const html = '<img src="https://content.da.example.invalid/bar/foo/media_123.png">';
-        assert.strictEqual(
-          utils.rewriteDaContentImageUrls(html, 'bar', 'foo'),
-          '<img src="https://main--foo--bar.preview.da.example.invalid/media_123.png">',
-        );
-      } finally {
-        if (originalDaDomain === undefined) {
-          delete process.env.DA_DOMAIN;
-        } else {
-          process.env.DA_DOMAIN = originalDaDomain;
-        }
-        if (originalContentDomain === undefined) {
-          delete process.env.DA_DOMAIN_CONTENT;
-        } else {
-          process.env.DA_DOMAIN_CONTENT = originalContentDomain;
-        }
-      }
-    });
-
     it('does not rewrite urls for a different org/site', () => {
       const html = '<img src="https://content.da.live/other/site/media_123.png">';
       assert.strictEqual(

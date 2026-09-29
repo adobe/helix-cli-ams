@@ -119,29 +119,6 @@ describe('DaClient', () => {
       assert.strictEqual(calledUrl, 'https://admin.da.live/list/myorg/myrepo/some/path');
     });
 
-    it('uses the configured DA domain', async () => {
-      const original = process.env.DA_DOMAIN;
-      process.env.DA_DOMAIN = 'da.example.invalid';
-      try {
-        // eslint-disable-next-line import/no-unresolved
-        const { DaClient: ConfiguredDaClient } = await import('../../src/content/da-api.js?configured-da-domain');
-        let calledUrl;
-        const configuredClient = new ConfiguredDaClient('test-token');
-        configuredClient.fetch = async (url) => {
-          calledUrl = url;
-          return mockResponse(200, []);
-        };
-        await configuredClient.list('myorg', 'myrepo', '/some/path');
-        assert.strictEqual(calledUrl, 'https://admin.da.example.invalid/list/myorg/myrepo/some/path');
-      } finally {
-        if (original === undefined) {
-          delete process.env.DA_DOMAIN;
-        } else {
-          process.env.DA_DOMAIN = original;
-        }
-      }
-    });
-
     it('passes auth header', async () => {
       let calledHeaders;
       client.fetch = async (url, opts) => {

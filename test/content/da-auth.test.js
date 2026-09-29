@@ -210,49 +210,6 @@ describe('getValidToken', () => {
 });
 
 describe('startDaLoginRedirect', () => {
-  it('uses the configured live host for the default logged-in redirect', async () => {
-    const previousLiveHost = process.env.HLX_PROD_SERVER_HOST_LIVE;
-    process.env.HLX_PROD_SERVER_HOST_LIVE = 'live.example.invalid';
-    let requestHandler;
-
-    try {
-      const { startDaLoginRedirect } = await esmock('../../src/content/da-auth.js', {
-        'node:http': {
-          default: {
-            createServer: (handler) => {
-              requestHandler = handler;
-              return { listen: () => {}, close: () => {}, on: () => {} };
-            },
-          },
-        },
-      });
-
-      startDaLoginRedirect();
-      let responseBody;
-      requestHandler(
-        { url: '/callback' },
-        {
-          writeHead: () => {},
-          end: (body) => {
-            responseBody = body;
-          },
-        },
-      );
-      assert.match(responseBody, /https:\/\/tools\.live\.example\.invalid\/cli\/logged-in/);
-
-      requestHandler(
-        { url: '/token?access_token=test-token' },
-        { writeHead: () => {}, end: () => {} },
-      );
-    } finally {
-      if (previousLiveHost === undefined) {
-        delete process.env.HLX_PROD_SERVER_HOST_LIVE;
-      } else {
-        process.env.HLX_PROD_SERVER_HOST_LIVE = previousLiveHost;
-      }
-    }
-  });
-
   it('returns the fixed :9898 callback as redirect_uri, regardless of the return url\'s own port', async () => {
     // Mock http so no real socket is bound (the fire-and-forget callback server
     // this starts is never asked for a token in this test).

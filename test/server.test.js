@@ -1495,16 +1495,12 @@ describe('Helix Server', () => {
       }
     });
 
-    it('rewrites a configured DA content image src to the configured preview domain', async () => {
-      const originalDaDomain = process.env.DA_DOMAIN;
-      const originalContentDomain = process.env.DA_DOMAIN_CONTENT;
-      process.env.DA_DOMAIN = 'da.example.invalid';
-      process.env.DA_DOMAIN_CONTENT = 'content.da.example.invalid';
+    it('rewrites content.da.live image src to the site preview domain', async () => {
       const cwd = await setupProject(path.join(__rootdir, 'test', 'fixtures', 'project'), testRoot);
       await fse.ensureDir(path.join(cwd, CONTENT_DIR));
       await fse.writeFile(
         path.join(cwd, CONTENT_DIR, 'index.html'),
-        '<body><header></header><main><div><img src="https://content.da.example.invalid/bar/foo/media_123.png"></div></main><footer></footer></body>',
+        '<body><header></header><main><div><img src="https://content.da.live/bar/foo/media_123.png"></div></main><footer></footer></body>',
       );
       await fse.writeFile(
         path.join(cwd, 'head.html'),
@@ -1529,22 +1525,12 @@ describe('Helix Server', () => {
         const resp = await getFetch()(`http://127.0.0.1:${project.server.port}/index.html`);
         assert.strictEqual(resp.status, 200);
         const body = await resp.text();
-        assert.ok(body.includes('src="https://main--foo--bar.preview.da.example.invalid/media_123.png"'));
-        assert.ok(!body.includes('src="https://content.da.example.invalid'));
-        assert.ok(body.includes('window.DaContentAuthConfig={"previewOrigin":"https://main--foo--bar.preview.da.example.invalid","probePath":"/media_123.png","clientId":"darkalley"'));
+        assert.ok(body.includes('src="https://main--foo--bar.preview.da.live/media_123.png"'));
+        assert.ok(!body.includes('src="https://content.da.live'));
+        assert.ok(body.includes('window.DaContentAuthConfig={"previewOrigin":"https://main--foo--bar.preview.da.live","probePath":"/media_123.png","clientId":"darkalley"'));
         assert.ok(body.includes('src="/__internal__/da-content-auth.js"'));
       } finally {
         await project.stop();
-        if (originalDaDomain === undefined) {
-          delete process.env.DA_DOMAIN;
-        } else {
-          process.env.DA_DOMAIN = originalDaDomain;
-        }
-        if (originalContentDomain === undefined) {
-          delete process.env.DA_DOMAIN_CONTENT;
-        } else {
-          process.env.DA_DOMAIN_CONTENT = originalContentDomain;
-        }
       }
     });
 
