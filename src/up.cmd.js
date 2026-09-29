@@ -156,7 +156,7 @@ export default class UpCommand extends AbstractServerCommand {
           this.log.error(chalk`Could not parse git remote origin URL: {yellow ${gitUrlError.message}}`);
           this.log.error('The git remote origin uses an SSH URL format that cannot be automatically resolved.');
           this.log.error(chalk`Please specify the content origin URL using the {cyan --url} option:`);
-          this.log.error(chalk`  {cyan aem up --url https://main--<repo>--<owner>.aem.page}`);
+          this.log.error(chalk`  {cyan aem up --url https://main--<repo>--<owner>.${process.env.HLX_PROD_SERVER_HOST_PAGE}}`);
           throw Error('Invalid git remote origin URL. Use --url to specify the content origin.');
         }
       } else {

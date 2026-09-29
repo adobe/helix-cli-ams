@@ -14,7 +14,7 @@ import processQueue from '@adobe/helix-shared-process-queue';
 import { getFetch } from '../fetch-utils.js';
 import { CONTENT_IO_CONCURRENCY } from './content-shared.js';
 
-const DA_ADMIN = 'https://admin.da.live';
+const DA_ADMIN = `https://admin.${process.env.DA_DOMAIN}`;
 
 /** Response header used to page past the per-request list limit (e.g. 1000 items). */
 const LIST_CONTINUATION_HEADER = 'da-continuation-token';
