@@ -881,7 +881,7 @@ describe('Integration test for up command with cache', function suite() {
         ? (message) => errors.push(message)
         : () => {}),
     });
-    process.env.HLX_PROD_SERVER_HOST_PAGE = 'gov-aem.page';
+    process.env.HLX_PROD_SERVER_HOST_PAGE = 'page.example.invalid';
     try {
       initGit(testDir, 'user@example.ghe.com:ACMEGROUP/acme-eds.git');
       const cmd = new UpCommand(logger)
@@ -889,7 +889,7 @@ describe('Integration test for up command with cache', function suite() {
         .withDirectory(testDir);
       await assert.rejects(() => cmd.init(), /Invalid git remote origin URL/);
       assert(errors.some((message) => message.includes(
-        'aem up --url https://main--<repo>--<owner>.gov-aem.page',
+        'aem up --url https://main--<repo>--<owner>.page.example.invalid',
       )));
     } finally {
       if (original === undefined) {

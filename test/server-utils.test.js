@@ -371,13 +371,13 @@ describe('Utils Test', () => {
     it('uses configured DA content and preview domains', () => {
       const originalDaDomain = process.env.DA_DOMAIN;
       const originalContentDomain = process.env.DA_DOMAIN_CONTENT;
-      process.env.DA_DOMAIN = 'gov-da.live';
-      process.env.DA_DOMAIN_CONTENT = 'content.gov-da.live';
+      process.env.DA_DOMAIN = 'da.example.invalid';
+      process.env.DA_DOMAIN_CONTENT = 'content.da.example.invalid';
       try {
-        const html = '<img src="https://content.gov-da.live/bar/foo/media_123.png">';
+        const html = '<img src="https://content.da.example.invalid/bar/foo/media_123.png">';
         assert.strictEqual(
           utils.rewriteDaContentImageUrls(html, 'bar', 'foo'),
-          '<img src="https://main--foo--bar.preview.gov-da.live/media_123.png">',
+          '<img src="https://main--foo--bar.preview.da.example.invalid/media_123.png">',
         );
       } finally {
         if (originalDaDomain === undefined) {

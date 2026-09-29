@@ -121,7 +121,7 @@ describe('DaClient', () => {
 
     it('uses the configured DA domain', async () => {
       const original = process.env.DA_DOMAIN;
-      process.env.DA_DOMAIN = 'gov-da.live';
+      process.env.DA_DOMAIN = 'da.example.invalid';
       try {
         // eslint-disable-next-line import/no-unresolved
         const { DaClient: ConfiguredDaClient } = await import('../../src/content/da-api.js?configured-da-domain');
@@ -132,7 +132,7 @@ describe('DaClient', () => {
           return mockResponse(200, []);
         };
         await configuredClient.list('myorg', 'myrepo', '/some/path');
-        assert.strictEqual(calledUrl, 'https://admin.gov-da.live/list/myorg/myrepo/some/path');
+        assert.strictEqual(calledUrl, 'https://admin.da.example.invalid/list/myorg/myrepo/some/path');
       } finally {
         if (original === undefined) {
           delete process.env.DA_DOMAIN;

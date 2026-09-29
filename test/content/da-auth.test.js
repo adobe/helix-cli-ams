@@ -212,7 +212,7 @@ describe('getValidToken', () => {
 describe('startDaLoginRedirect', () => {
   it('uses the configured live host for the default logged-in redirect', async () => {
     const previousLiveHost = process.env.HLX_PROD_SERVER_HOST_LIVE;
-    process.env.HLX_PROD_SERVER_HOST_LIVE = 'gov-aem.live';
+    process.env.HLX_PROD_SERVER_HOST_LIVE = 'live.example.invalid';
     let requestHandler;
 
     try {
@@ -238,7 +238,7 @@ describe('startDaLoginRedirect', () => {
           },
         },
       );
-      assert.match(responseBody, /https:\/\/tools\.gov-aem\.live\/cli\/logged-in/);
+      assert.match(responseBody, /https:\/\/tools\.live\.example\.invalid\/cli\/logged-in/);
 
       requestHandler(
         { url: '/token?access_token=test-token' },
