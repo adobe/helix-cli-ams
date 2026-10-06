@@ -1,3 +1,17 @@
+## [16.22.1](https://github.com/adobe/helix-cli/compare/v16.22.0...v16.22.1) (2026-10-05)
+
+
+### Bug Fixes
+
+* **deps:** update dependency @adobe/helix-shared-config to v11.2.5 ([#2802](https://github.com/adobe/helix-cli/issues/2802)) ([f713c76](https://github.com/adobe/helix-cli/commit/f713c7683bb5564aa143f9d8468173f9323c4fea))
+
+# [16.22.0](https://github.com/adobe/helix-cli/compare/v16.21.25...v16.22.0) (2026-10-05)
+
+
+### Features
+
+* **content:** make the da.live backend and IMS provider configurable via env vars ([#2800](https://github.com/adobe/helix-cli/issues/2800)) ([21b735c](https://github.com/adobe/helix-cli/commit/21b735c1a6262644c5b2001bf2747284231a5af9))
+
 ## [16.21.25](https://github.com/adobe/helix-cli/compare/v16.21.24...v16.21.25) (2026-10-04)
 
 
