@@ -12,6 +12,8 @@
 
 /* eslint-env mocha */
 import assert from 'assert';
+import net from 'net';
+import os from 'os';
 import path from 'path';
 import fse from 'fs-extra';
 import esmock from 'esmock';
@@ -19,6 +21,7 @@ import shell from 'shelljs';
 import { GitUrl } from '@adobe/helix-shared-git';
 import {
   Nock, assertHttp, createTestRoot, initGit, switchBranch, signal,
+  initGitWithWorktree, cleanupWorktree,
 } from './utils.js';
 import UpCommand from '../src/up.cmd.js';
 import GitUtils from '../src/git-utils.js';
@@ -594,6 +597,52 @@ describe('Integration test for up command with git worktrees', function suite() 
     nock.done();
   });
 
+  [
+    { name: 'uses a branch-based port when no port is configured' },
+    { name: 'uses a branch-based port when the CLI supplies undefined', port: undefined },
+    { name: 'honors explicitly configured port 3000', port: 3000 },
+    { name: 'honors explicitly configured non-default ports', port: 3210 },
+    { name: 'honors port zero for an ephemeral port', port: 0 },
+  ].forEach(({ name, ...options }) => {
+    it(name, async () => {
+      const { worktreeDir, branchName } = await initGitWithWorktree(
+        testDir,
+        'port-selection',
+        'https://github.com/adobe/dummy-foo.git',
+      );
+      const cmd = new UpCommand()
+        .withLiveReload(false)
+        .withDirectory(worktreeDir);
+      if ('port' in options) {
+        cmd.withHttpPort(options.port);
+      }
+      try {
+        await cmd.init();
+        assert.strictEqual(
+          cmd.project.server.port,
+          options.port ?? GitUtils.hashBranchToPort(branchName),
+        );
+      } finally {
+        await cmd.stop();
+        await cleanupWorktree(testDir, worktreeDir);
+      }
+    });
+  });
+
+  it('uses port 3000 by default in a regular repository', async () => {
+    initGit(testDir, 'https://github.com/adobe/dummy-foo.git');
+    const cmd = new UpCommand()
+      .withLiveReload(false)
+      .withDirectory(testDir)
+      .withHttpPort(undefined);
+    try {
+      await cmd.init();
+      assert.strictEqual(cmd.project.server.port, 3000);
+    } finally {
+      await cmd.stop();
+    }
+  });
+
   it('should detect worktree and calculate branch-based port', async () => {
     // Setup a regular git repo first
     initGit(testDir, 'https://github.com/adobe/dummy-foo.git');
@@ -710,6 +759,60 @@ describe('Integration test for up command with git worktrees', function suite() 
         }
       }
       await fse.remove(worktreeDir).catch(() => {});
+    }
+  });
+
+  it('should not watch the git fsmonitor socket', async function test() {
+    if (process.platform === 'win32') {
+      this.skip();
+    }
+    initGit(testDir, 'https://github.com/adobe/dummy-foo.git');
+
+    // unix socket paths are limited to ~100 chars and silently truncated, so bind in a short
+    // temp dir and move the socket into the git directory afterwards
+    const socketDir = await fse.mkdtemp(path.join(os.tmpdir(), 'aem-'));
+    const socketServer = net.createServer();
+    await new Promise((resolve, reject) => {
+      socketServer.once('error', reject);
+      socketServer.listen(path.resolve(socketDir, 'f.ipc'), resolve);
+    });
+    await fse.move(
+      path.resolve(socketDir, 'f.ipc'),
+      path.resolve(testDir, '.git', 'fsmonitor--daemon.ipc'),
+    );
+
+    const cmd = new UpCommand()
+      .withLiveReload(false)
+      .withDirectory(testDir)
+      .withHttpPort(0);
+
+    try {
+      await new Promise((resolve, reject) => {
+        cmd
+          .on('started', async () => {
+            try {
+              // chokidar registers its watches asynchronously
+              await new Promise((r) => {
+                setTimeout(r, 500);
+              });
+              // eslint-disable-next-line no-underscore-dangle
+              const watched = Object.values(cmd._watcher.getWatched()).flat();
+              assert.ok(watched.includes('HEAD'), 'git HEAD should be watched');
+              assert.ok(!watched.includes('fsmonitor--daemon.ipc'), 'fsmonitor socket must not be watched');
+              await cmd.stop();
+            } catch (e) {
+              reject(e);
+            }
+          })
+          .on('stopped', resolve)
+          .run()
+          .catch(reject);
+      });
+    } finally {
+      await new Promise((resolve) => {
+        socketServer.close(resolve);
+      });
+      await fse.remove(socketDir);
     }
   });
 });

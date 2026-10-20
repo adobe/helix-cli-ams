@@ -102,13 +102,14 @@ export default class UpCommand extends AbstractServerCommand {
       throw e;
     }
 
-    // Check if we're in a worktree and need to adjust the port
-    const isWorktree = await GitUtils.isGitWorktree(this.directory);
-    if (isWorktree && this._httpPort === 3000) {
-      // Only adjust port if using default port
-      const branch = await GitUtils.getBranch(this.directory);
-      this._httpPort = GitUtils.hashBranchToPort(branch);
-      this.log.info(chalk`Git worktree detected. Using port {cyan ${this._httpPort}} for branch {cyan ${branch}}`);
+    // Select a default only when no port was explicitly configured.
+    if (this._httpPort === undefined || this._httpPort === -1) {
+      this._httpPort = 3000;
+      if (await GitUtils.isGitWorktree(this.directory)) {
+        const branch = await GitUtils.getBranch(this.directory);
+        this._httpPort = GitUtils.hashBranchToPort(branch);
+        this.log.info(chalk`Git worktree detected. Using port {cyan ${this._httpPort}} for branch {cyan ${branch}}`);
+      }
     }
 
     // init dev default file params
@@ -236,6 +237,12 @@ export default class UpCommand extends AbstractServerCommand {
     this._watcher = chokidar.watch(gitDir, {
       persistent: true,
       ignoreInitial: true,
+      // git's fsmonitor daemon creates a unix socket that fs.watch cannot watch
+      ignored: /fsmonitor--daemon/,
+    });
+
+    this._watcher.on('error', (err) => {
+      this.log.warn(`unable to watch git directory: ${err.message}`);
     });
 
     this._watcher.on('all', (eventType, file) => {
