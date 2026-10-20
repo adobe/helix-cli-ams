@@ -1,0 +1,84 @@
+name: Build-ams
+on:
+  push:
+    branches:
+      - main-ams
+  pull_request:
+    branches:
+      - main-ams
+
+env:
+  CI_BUILD_NUM: ${{ github.run_id }}
+  CI_BRANCH: ${{ github.ref_name }}
+
+permissions:
+  contents: write  # semantic-release-dry verifies the write permissions
+  issues: read # needed by semantic-release
+  pull-requests: write # needed by semantic-release
+  id-token: write # needed for npm trusted publishers with OIDC
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.x'
+      - run: npm i
+
+      # Sub-project setup and testing (conditional)
+      - name: Cache Playwright browsers
+        if: hashFiles('packages/browser-injectables/**') != ''
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('packages/browser-injectables/package-lock.json') }}
+
+      - name: Install browser injectable dependencies
+        if: hashFiles('packages/browser-injectables/**') != ''
+        run: cd packages/browser-injectables && npm ci
+
+      - name: Install Playwright browsers (chromium, firefox, webkit)
+        if: hashFiles('packages/browser-injectables/**') != ''
+        run: cd packages/browser-injectables && npx playwright install --with-deps chromium firefox webkit
+
+      - run: git config --global user.email "test@project-helix.io" && git config --global user.name "Test Build"
+      - run: git config --global protocol.file.allow always
+      - run: npm run lint
+      - run: npm test
+        env:
+          CIRCLE_REPOSITORY_URL: dummy-url
+
+      # Browser injectable tests (conditional)
+      - name: Test browser injectables
+        if: hashFiles('packages/browser-injectables/**') != ''
+        run: cd packages/browser-injectables && npm test
+
+      - uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage/lcov.info,./packages/browser-injectables/coverage/lcov.info
+          flags: unittests,browsertests
+
+  test_win:
+    name: Test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v7
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.x'
+      - run: npm i
+      - run: git config --global user.email "test@project-helix.io" && git config --global user.name "Test Build"
+      - run: git config --global protocol.file.allow always
+      - name: Run Windows Tests
+        run: npm run test-ci-win
+        timeout-minutes: 8
+        env:
+          CIRCLE_REPOSITORY_URL: dummy-url
