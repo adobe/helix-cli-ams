@@ -1,3 +1,17 @@
+## [16.22.18](https://github.com/adobe/helix-cli/compare/v16.22.17...v16.22.18) (2026-11-09)
+
+
+### Bug Fixes
+
+* **deps:** update dependency glob to v14 [security] ([#2822](https://github.com/adobe/helix-cli/issues/2822)) ([a55100d](https://github.com/adobe/helix-cli/commit/a55100d883bb1ceb899e1c2c7ae18115f848bbe0))
+
+## [16.22.17](https://github.com/adobe/helix-cli/compare/v16.22.16...v16.22.17) (2026-11-09)
+
+
+### Bug Fixes
+
+* **html-folder:** extract metadata block anywhere in .plain.html and normalize names ([#2824](https://github.com/adobe/helix-cli/issues/2824)) ([59e3dd7](https://github.com/adobe/helix-cli/commit/59e3dd714a2cb617e07f52c7cb86552058dbd7b5)), closes [#2823](https://github.com/adobe/helix-cli/issues/2823) [#2823](https://github.com/adobe/helix-cli/issues/2823)
+
 ## [16.22.16](https://github.com/adobe/helix-cli/compare/v16.22.15...v16.22.16) (2026-10-28)
 
 
